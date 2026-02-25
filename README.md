@@ -25,6 +25,7 @@
 - **扫码登录** — 微信公众平台扫码登录，凭证自动保存
 - **自动限频** — 内置三层限频机制（全局/IP/文章间隔），防止触发微信风控
 - **Webhook 通知** — 登录过期、触发验证等事件自动推送
+- **RSS 订阅** — 订阅任意公众号，自动定时拉取新文章，生成标准 RSS 2.0 源
 - **API 文档** — 自动生成 Swagger UI，在线调试所有接口
 
 <div align="center">
@@ -165,6 +166,46 @@ curl "http://localhost:5000/api/public/articles?fakeid=YOUR_FAKEID&begin=50&coun
 curl "http://localhost:5000/api/public/articles/search?fakeid=YOUR_FAKEID&query=关键词"
 ```
 
+### RSS 订阅
+
+`GET /api/rss/{fakeid}` — 获取指定公众号的 RSS 2.0 订阅源
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `fakeid` | string（路径） | 是 | 公众号 FakeID |
+| `limit` | int（查询） | 否 | 返回文章数量上限，默认 `20` |
+
+使用方式：
+
+```bash
+# 1. 搜索公众号获取 fakeid
+curl "http://localhost:5000/api/public/searchbiz?query=人民日报"
+# 返回 fakeid: MzA1MjM1ODk2MA==
+
+# 2. 添加订阅
+curl -X POST http://localhost:5000/api/rss/subscribe \
+  -H "Content-Type: application/json" \
+  -d '{"fakeid": "MzA1MjM1ODk2MA==", "nickname": "人民日报"}'
+
+# 3. 手动触发一次轮询（立即拉取文章）
+curl -X POST http://localhost:5000/api/rss/poll
+
+# 4. 获取 RSS 源（把这个地址添加到 RSS 阅读器）
+curl "http://localhost:5000/api/rss/MzA1MjM1ODk2MA=="
+```
+
+也可以通过管理面板的 **RSS 订阅** 页面可视化管理，搜索公众号一键订阅并复制 RSS 地址。
+
+#### RSS 订阅管理接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/rss/subscribe` | 添加 RSS 订阅 |
+| `DELETE` | `/api/rss/subscribe/{fakeid}` | 取消 RSS 订阅 |
+| `GET` | `/api/rss/subscriptions` | 获取订阅列表 |
+| `POST` | `/api/rss/poll` | 手动触发轮询 |
+| `GET` | `/api/rss/status` | 轮询器状态 |
+
 ### 其他接口
 
 | 方法 | 路径 | 说明 |
@@ -201,7 +242,93 @@ cp env.example .env
 | `RATE_LIMIT_GLOBAL` | 全局每分钟请求上限 | 10 |
 | `RATE_LIMIT_PER_IP` | 单 IP 每分钟请求上限 | 5 |
 | `RATE_LIMIT_ARTICLE_INTERVAL` | 文章请求最小间隔（秒） | 3 |
+| `RSS_POLL_INTERVAL` | RSS 轮询间隔（秒） | 3600 |
+| `PROXY_URLS` | 代理池地址（多个逗号分隔，留空直连） | 空 |
 | `PORT` | 服务端口 | 5000 |
+| `HOST` | 监听地址 | 0.0.0.0 |
+| `DEBUG` | 调试模式（开启热重载） | false |
+
+### 代理池配置（可选）
+
+文章内容获取接口（`POST /api/article`）会访问微信文章页面，频繁请求可能触发微信验证码保护。配置代理池可以将请求分散到不同 IP，降低风控风险。
+
+> 本项目使用 `curl_cffi` 模拟 Chrome TLS 指纹，请求特征与真实浏览器一致，配合代理池效果更佳。
+
+**方案：多台 VPS 自建 SOCKS5 代理**
+
+准备 2-3 台低价 VPS（各大云厂商轻量应用服务器即可，¥20-30/月/台），每台运行一个 SOCKS5 代理服务。推荐 [gost](https://github.com/go-gost/gost)（Go 语言实现，单二进制文件，无依赖）。
+
+**第一步：在每台 VPS 上安装 gost**
+
+```bash
+# 下载最新版（以 Linux amd64 为例，其他架构请去 GitHub Releases 页面选择）
+# 国外服务器直接下载
+wget https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_amd64.tar.gz
+
+# 国内服务器使用加速镜像（任选一个可用的）
+wget https://gh-proxy.com/https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_amd64.tar.gz
+# 或
+wget https://ghproxy.cc/https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_amd64.tar.gz
+
+# 解压并移动到系统路径
+tar -xzf gost_3.2.6_linux_amd64.tar.gz
+mv gost /usr/local/bin/
+chmod +x /usr/local/bin/gost
+
+# 验证安装
+gost -V
+```
+
+**第二步：启动 SOCKS5 代理服务**
+
+```bash
+# 带用户名密码认证（推荐，替换 myuser / mypass 和端口）
+gost -L socks5://myuser:mypass@:1080
+
+# 不带认证（仅内网或已配置防火墙时使用）
+gost -L socks5://:1080
+```
+
+**第三步：配置为 systemd 服务（开机自启）**
+
+```bash
+cat > /etc/systemd/system/gost.service << 'EOF'
+[Unit]
+Description=GOST Proxy
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gost -L socks5://myuser:mypass@:1080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable gost
+systemctl start gost
+```
+
+**第四步：开放防火墙端口**
+
+```bash
+# 仅允许你的主服务器 IP 连接（替换为实际 IP）
+ufw allow from YOUR_MAIN_SERVER_IP to any port 1080
+
+# 或者如果用的是云厂商安全组，在控制台添加入站规则：
+# 端口 1080 / TCP / 来源 IP 限制为你的主服务器
+```
+
+**第五步：在主服务器 `.env` 中配置代理池**
+
+```bash
+PROXY_URLS=socks5://myuser:mypass@vps1-ip:1080,socks5://myuser:mypass@vps2-ip:1080,socks5://myuser:mypass@vps3-ip:1080
+```
+
+配置后重启服务，每次文章请求会轮流使用不同的代理 IP。可以通过 `GET /api/health` 确认代理池状态。留空则直连（默认行为）。
 
 ---
 
@@ -211,9 +338,12 @@ cp env.example .env
 ├── app.py                # FastAPI 主应用
 ├── requirements.txt      # Python 依赖
 ├── env.example           # 环境变量示例
+├── data/                 # 数据目录（运行时自动创建）
+│   └── rss.db            # RSS 订阅 SQLite 数据库
 ├── routes/               # API 路由
 │   ├── article.py        # 文章内容获取
 │   ├── articles.py       # 文章列表
+│   ├── rss.py            # RSS 订阅管理与输出
 │   ├── search.py         # 公众号搜索
 │   ├── login.py          # 扫码登录
 │   ├── admin.py          # 管理接口
@@ -223,9 +353,13 @@ cp env.example .env
 ├── utils/                # 工具模块
 │   ├── auth_manager.py   # 认证管理
 │   ├── helpers.py        # HTML 解析
+│   ├── http_client.py    # HTTP 客户端（curl_cffi + 代理池）
+│   ├── proxy_pool.py     # 代理池轮转
 │   ├── rate_limiter.py   # 限频器
+│   ├── rss_store.py      # RSS 数据存储（SQLite）
+│   ├── rss_poller.py     # RSS 后台轮询器
 │   └── webhook.py        # Webhook 通知
-└── static/               # 前端页面
+└── static/               # 前端页面（含 RSS 管理）
 ```
 
 ---

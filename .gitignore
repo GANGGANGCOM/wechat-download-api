@@ -60,3 +60,6 @@ fetch_progress.json
 
 # Logs
 logs/
+
+# RSS database
+data/

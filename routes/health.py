@@ -9,27 +9,22 @@
 """
 
 from fastapi import APIRouter
-from pydantic import BaseModel
 
 router = APIRouter()
 
-class HealthResponse(BaseModel):
-    """健康检查响应"""
-    status: str
-    version: str
-    framework: str
 
-@router.get("/health", response_model=HealthResponse, summary="健康检查")
+@router.get("/health", summary="健康检查")
 async def health_check():
     """
-    检查服务健康状态
-    
-    Returns:
-        服务状态信息
+    检查服务健康状态，包括 HTTP 引擎和代理池信息。
     """
+    from utils.http_client import ENGINE_NAME
+    from utils.proxy_pool import proxy_pool
+
     return {
         "status": "healthy",
         "version": "1.0.0",
-        "framework": "FastAPI"
+        "framework": "FastAPI",
+        "http_engine": ENGINE_NAME,
+        "proxy_pool": proxy_pool.get_status(),
     }
-

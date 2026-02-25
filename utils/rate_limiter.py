@@ -9,6 +9,7 @@ API限频模块
 防止触发微信风控
 """
 
+import os
 import time
 from typing import Dict, Optional
 from collections import deque
@@ -17,27 +18,26 @@ import threading
 class RateLimiter:
     """
     智能限频器
-    
+
     策略:
-    1. 全局限制: 每分钟最多10个请求
-    2. 单IP限制: 每分钟最多5个请求
-    3. 文章获取: 每个文章间隔至少3秒
+    1. 全局限制: 每分钟最多 N 个请求
+    2. 单IP限制: 每分钟最多 N 个请求
+    3. 文章获取: 每个文章间隔至少 N 秒
     """
-    
+
     def __init__(self):
-        self._global_requests = deque()  # 全局请求记录
-        self._ip_requests: Dict[str, deque] = {}  # IP请求记录
-        self._article_requests = deque()  # 文章请求记录
+        self._global_requests = deque()
+        self._ip_requests: Dict[str, deque] = {}
+        self._article_requests = deque()
         self._lock = threading.Lock()
-        
-        # 限制配置
-        self.GLOBAL_WINDOW = 60  # 全局窗口60秒
-        self.GLOBAL_LIMIT = 10  # 全局限制10个请求/分钟
-        
-        self.IP_WINDOW = 60  # IP窗口60秒
-        self.IP_LIMIT = 5  # 单IP限制5个请求/分钟
-        
-        self.ARTICLE_INTERVAL = 3  # 文章获取间隔3秒
+
+        self.GLOBAL_WINDOW = 60
+        self.GLOBAL_LIMIT = int(os.getenv("RATE_LIMIT_GLOBAL", "10"))
+
+        self.IP_WINDOW = 60
+        self.IP_LIMIT = int(os.getenv("RATE_LIMIT_PER_IP", "5"))
+
+        self.ARTICLE_INTERVAL = int(os.getenv("RATE_LIMIT_ARTICLE_INTERVAL", "3"))
     
     def check_rate_limit(self, ip: str, endpoint: str) -> tuple[bool, Optional[str]]:
         """

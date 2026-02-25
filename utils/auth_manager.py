@@ -13,7 +13,7 @@ import os
 import time
 from pathlib import Path
 from typing import Optional, Dict
-from dotenv import load_dotenv, set_key, find_dotenv
+from dotenv import load_dotenv, set_key
 
 class AuthManager:
     """认证管理单例类"""

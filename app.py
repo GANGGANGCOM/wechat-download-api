@@ -9,15 +9,18 @@
 主应用文件
 """
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-import os
 from pathlib import Path
 
 # 导入路由
-from routes import article, articles, search, admin, login, image, health, stats
+from routes import article, articles, search, admin, login, image, health, stats, rss
+from utils.rss_store import init_db
+from utils.rss_poller import rss_poller
 
 API_DESCRIPTION = """
 微信公众号文章下载 API，支持文章解析、公众号搜索、文章列表获取等功能。
@@ -34,6 +37,29 @@ API_DESCRIPTION = """
 所有核心接口都需要先登录。登录后凭证自动保存到 `.env` 文件，服务重启后无需重新登录（有效期约 4 天）。
 """
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期：启动和关闭"""
+    env_file = Path(__file__).parent / ".env"
+    if not env_file.exists():
+        print("\n" + "=" * 60)
+        print("[WARNING] .env file not found")
+        print("=" * 60)
+        print("Please configure .env file or login via admin page")
+        print("Visit: http://localhost:5000/admin.html")
+        print("=" * 60 + "\n")
+    else:
+        print("\n" + "=" * 60)
+        print("[OK] .env file loaded")
+        print("=" * 60 + "\n")
+
+    init_db()
+    await rss_poller.start()
+    yield
+    await rss_poller.stop()
+
+
 app = FastAPI(
     title="WeChat Download API",
     description=API_DESCRIPTION,
@@ -45,6 +71,7 @@ app = FastAPI(
         "name": "AGPL-3.0",
         "url": "https://www.gnu.org/licenses/agpl-3.0.html",
     },
+    lifespan=lifespan,
 )
 
 # CORS配置
@@ -65,6 +92,7 @@ app.include_router(search.router, prefix="/api/public", tags=["公众号搜索"]
 app.include_router(admin.router, prefix="/api/admin", tags=["管理"])
 app.include_router(login.router, prefix="/api/login", tags=["登录"])
 app.include_router(image.router, prefix="/api", tags=["图片代理"])
+app.include_router(rss.router, prefix="/api", tags=["RSS 订阅"])
 
 # 静态文件
 static_dir = Path(__file__).parent / "static"
@@ -107,39 +135,34 @@ async def verify_page():
     """验证页面"""
     return FileResponse(static_dir / "verify.html")
 
-# 启动事件
-@app.on_event("startup")
-async def startup_event():
-    """启动时检查配置"""
-    env_file = Path(__file__).parent / ".env"
-    if not env_file.exists():
-        print("\n" + "=" * 60)
-        print("[WARNING] .env file not found")
-        print("=" * 60)
-        print("Please configure .env file or login via admin page")
-        print("Visit: http://localhost:5000/admin.html")
-        print("=" * 60 + "\n")
-    else:
-        print("\n" + "=" * 60)
-        print("[OK] .env file loaded")
-        print("=" * 60 + "\n")
+@app.get("/rss.html", include_in_schema=False)
+async def rss_page():
+    """RSS 订阅管理页面"""
+    return FileResponse(static_dir / "rss.html")
 
 if __name__ == "__main__":
+    import os
     import uvicorn
-    
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "5000"))
+    debug = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
+
     print("=" * 60)
     print("Wechat Article API Service - FastAPI Version")
     print("=" * 60)
-    print("Admin Page: http://localhost:5000/admin.html")
-    print("API Docs:   http://localhost:5000/api/docs")
-    print("ReDoc Docs: http://localhost:5000/api/redoc")
+    print(f"Admin Page: http://localhost:{port}/admin.html")
+    print(f"API Docs:   http://localhost:{port}/api/docs")
+    print(f"ReDoc Docs: http://localhost:{port}/api/redoc")
     print("First time? Please login via admin page")
     print("=" * 60)
-    
+
     uvicorn.run(
         "app:app",
-        host="0.0.0.0",
-        port=5000,
-        reload=True,
-        log_level="info"
+        host=host,
+        port=port,
+        reload=debug,
+        log_level="debug" if debug else "info",
     )
