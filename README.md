@@ -39,11 +39,19 @@
 
 ---
 
-## SaaS 托管版（即将推出）
+## SaaS 托管版 — 已上线 🚀
 
-不想自己部署？我们正在筹备 **RSS 订阅托管服务**——无需服务器、无需配置，输入公众号名称即可获得 RSS 订阅地址，直接接入你喜欢的 RSS 阅读器。同时也在评估开放文章内容获取 API 的托管方案。
+**不想折腾部署？30 秒注册即可使用** 👉 **[wechatrss.waytomaster.com](https://wechatrss.waytomaster.com)**
 
-感兴趣的话欢迎扫码添加微信，提前锁定体验名额 👇 [联系方式](#联系方式)
+搜索公众号名称，拿到 RSS 链接，丢进你的阅读器——Feedly、Inoreader、NetNewsWire 全部兼容。
+
+| 套餐 | 公众号数量 | 轮询频率 | 价格 |
+|------|-----------|---------|------|
+| 免费版 | 2 个 | 每 4 小时 | ¥0 |
+| 基础版 | 20 个 | 每 2 小时 | ¥9.9/月 |
+| 专业版 | 50 个 | 每 1 小时 | ¥19.9/月 |
+
+> 免费版够用就一直免费，不够了再升级，没有套路。
 
 ---
 
@@ -56,6 +64,8 @@
 3. 登录成功后凭证自动保存到 `.env` 文件，有效期约 **4 天**，过期后需重新扫码
 
 登录后即可通过 API 获取**任意公众号**的公开文章（不限于自己的公众号）。
+
+> **本地电脑可以直接使用！** 不需要公网服务器——在本地启动服务后通过 `localhost` 访问即可完成扫码登录和全部功能。只有当你需要从其他设备（如手机 RSS 阅读器）远程访问时，才需要公网服务器或内网穿透。
 
 ---
 
@@ -101,6 +111,60 @@ python app.py
 | http://localhost:5000/login.html | 扫码登录 |
 | http://localhost:5000/api/docs | Swagger API 文档 |
 | http://localhost:5000/api/health | 健康检查 |
+
+---
+
+## 服务器部署
+
+### Linux 生产环境（systemd）
+
+`start.sh` 脚本在 Linux 上以 `sudo` 运行时，会自动注册 systemd 服务并启用开机自启：
+
+```bash
+sudo bash start.sh
+```
+
+之后可通过以下命令管理服务：
+
+```bash
+# 查看运行状态
+bash status.sh
+
+# 停止服务
+bash stop.sh
+
+# 手动操作
+sudo systemctl restart wechat-download-api
+sudo systemctl status wechat-download-api
+```
+
+### 配置反向代理（可选）
+
+如需通过域名或 HTTPS 访问，配置 Nginx 反向代理到 `localhost:5000`：
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+### 环境变量
+
+复制 `env.example` 为 `.env` 并按需修改：
+
+```bash
+cp env.example .env
+```
+
+主要配置项参见 `env.example` 中的注释说明。
 
 ---
 
@@ -476,6 +540,8 @@ Cookie 登录有效期约 4 天，过期后需重新扫码登录。配置 `WEBHO
 </table>
 
 - **GitHub Issues**: [提交问题](https://github.com/tmwgsicp/wechat-download-api/issues)
+- **邮箱**: creator@waytomaster.com
+- **SaaS 托管版**: [wechatrss.waytomaster.com](https://wechatrss.waytomaster.com)
 
 ---
 
