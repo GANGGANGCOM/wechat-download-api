@@ -34,12 +34,31 @@ class AuthManager:
         self.base_dir = Path(__file__).parent.parent
         self.env_path = self.base_dir / ".env"
         
+        # Docker环境下的凭证文件（存储在data目录，权限更可靠）
+        self.credentials_file = self.base_dir / "data" / ".credentials.json"
+        
         # 加载环境变量
         self._load_credentials()
         self._initialized = True
     
     def _load_credentials(self):
-        """从.env文件加载凭证"""
+        """
+        从多个来源加载凭证，优先级：
+        1. data/.credentials.json (Docker环境推荐)
+        2. .env 文件 (本地部署)
+        3. 环境变量
+        """
+        # 先尝试从 JSON 凭证文件加载（Docker 环境）
+        if self.credentials_file.exists():
+            try:
+                import json
+                with open(self.credentials_file, 'r', encoding='utf-8') as f:
+                    self.credentials = json.load(f)
+                return
+            except Exception as e:
+                print(f"Warning: Failed to load credentials from {self.credentials_file}: {e}")
+        
+        # 回退到 .env 文件（本地部署）
         if self.env_path.exists():
             load_dotenv(self.env_path, override=True)
         
@@ -54,7 +73,9 @@ class AuthManager:
     def save_credentials(self, token: str, cookie: str, fakeid: str, 
                         nickname: str, expire_time: int) -> bool:
         """
-        保存凭证到.env文件
+        保存凭证，支持双存储策略：
+        1. 优先保存到 data/.credentials.json (Docker环境推荐，权限可靠)
+        2. 同时尝试保存到 .env (本地部署兼容)
         
         Args:
             token: 微信Token
@@ -66,21 +87,33 @@ class AuthManager:
         Returns:
             保存是否成功
         """
+        # 更新内存中的凭证
+        self.credentials.update({
+            "token": token,
+            "cookie": cookie,
+            "fakeid": fakeid,
+            "nickname": nickname,
+            "expire_time": expire_time
+        })
+        
+        success = False
+        
+        # 策略1: 保存到 data/.credentials.json (Docker 环境优先)
         try:
-            # 更新内存中的凭证
-            self.credentials.update({
-                "token": token,
-                "cookie": cookie,
-                "fakeid": fakeid,
-                "nickname": nickname,
-                "expire_time": expire_time
-            })
-            
-            # 确保.env文件存在
+            import json
+            self.credentials_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.credentials_file, 'w', encoding='utf-8') as f:
+                json.dump(self.credentials, f, indent=2, ensure_ascii=False)
+            print(f"[OK] 凭证已保存到: {self.credentials_file}")
+            success = True
+        except Exception as e:
+            print(f"[WARN] 无法保存到凭证文件: {e}")
+        
+        # 策略2: 同时尝试保存到 .env 文件（本地部署兼容）
+        try:
             if not self.env_path.exists():
                 self.env_path.touch()
             
-            # 保存到.env文件
             env_file = str(self.env_path)
             set_key(env_file, "WECHAT_TOKEN", token)
             set_key(env_file, "WECHAT_COOKIE", cookie)
@@ -88,11 +121,17 @@ class AuthManager:
             set_key(env_file, "WECHAT_NICKNAME", nickname)
             set_key(env_file, "WECHAT_EXPIRE_TIME", str(expire_time))
             
-            print(f"✅ 凭证已保存到: {self.env_path}")
-            return True
+            print(f"[OK] 凭证已同步到: {self.env_path}")
+            success = True
         except Exception as e:
-            print(f"❌ 保存凭证失败: {e}")
+            print(f"[WARN] 无法写入 .env 文件 (Docker环境正常): {e}")
+            # Docker 环境下 .env 可能只读，不影响功能
+        
+        if not success:
+            print(f"[ERROR] 凭证保存完全失败")
             return False
+        
+        return True
     
     def get_credentials(self) -> Optional[Dict[str, any]]:
         """
@@ -155,7 +194,7 @@ class AuthManager:
     
     def clear_credentials(self) -> bool:
         """
-        清除凭证
+        清除凭证（双存储都清除）
         
         Returns:
             清除是否成功
@@ -178,12 +217,20 @@ class AuthManager:
             for key in env_keys:
                 os.environ.pop(key, None)
             
+            # 删除凭证文件
+            if self.credentials_file.exists():
+                self.credentials_file.unlink()
+                print(f"[OK] 凭证文件已删除: {self.credentials_file}")
+            
             # 清空 .env 文件中的凭证字段（保留其他配置）
-            if self.env_path.exists():
-                env_file = str(self.env_path)
-                for key in env_keys:
-                    set_key(env_file, key, "")
-                print(f"✅ 凭证已清除: {self.env_path}")
+            try:
+                if self.env_path.exists():
+                    env_file = str(self.env_path)
+                    for key in env_keys:
+                        set_key(env_file, key, "")
+                    print(f"[OK] .env 凭证已清除: {self.env_path}")
+            except Exception as e:
+                print(f"[WARN] 无法清除 .env 文件 (Docker环境正常): {e}")
             
             return True
         except Exception as e:

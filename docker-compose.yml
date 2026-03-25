@@ -6,6 +6,11 @@
 #   2. Edit .env and set SITE_URL to your actual URL
 #   3. Run: docker-compose up -d
 #   4. Visit http://localhost:5000/login.html to scan QR code
+#
+# Note for NAS users (Synology/QNAP):
+#   If you encounter permission issues, run on NAS:
+#   - chmod -R 777 ./data
+#   - Credentials are automatically saved to ./data directory
 
 services:
   wechat-api:
@@ -17,10 +22,10 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      # Persist SQLite database
+      # Persist SQLite database and credentials
       - ./data:/app/data
-      # Config file (writable - login saves credentials here)
-      - ./.env:/app/.env
+      # Config file (read-only - credentials saved to data/)
+      - ./.env:/app/.env:ro
     environment:
       - TZ=Asia/Shanghai
     healthcheck:
