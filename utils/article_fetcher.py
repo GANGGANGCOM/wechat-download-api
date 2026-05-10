@@ -49,72 +49,76 @@ async def _fetch_via_proxy(
 ) -> Optional[str]:
     """
     通过 SOCKS5 代理或直连获取文章
-
     Args:
         article_url: 文章 URL
         timeout: 超时时间
         wechat_cookie: 微信 Cookie
         wechat_token: 微信 Token
-        max_retries: 内容验证失败时的最大重试次数(每次会尝试不同代理)
+        max_retries: 内容验证失败时的最大重试次数（每次会尝试不同代理）
     """
     try:
         from utils.http_client import fetch_page
         
-        logger.info("[Fetch] %s", article_url[:80])
-        
-        full_url = article_url
-        if wechat_token:
-            separator = '&' if '?' in article_url else '?'
-            full_url = f"{article_url}{separator}token={wechat_token}"
-        
         extra_headers = {"Referer": "https://mp.weixin.qq.com/"}
-        if wechat_cookie:
-            extra_headers["Cookie"] = wechat_cookie
+        is_public_url = "/s/" in article_url or "mp.weixin.qq.com/s?" in article_url
         
         for attempt in range(max_retries + 1):
             try:
-                html = await fetch_page(
-                    full_url,
-                    extra_headers=extra_headers,
-                    timeout=timeout
-                )
+                current_headers = extra_headers.copy()
+                current_url = article_url
+                
+                # 策略：前几次尝试直连/代理，最后一次尝试带 Cookie
+                if not is_public_url or attempt == max_retries:
+                    if wechat_cookie: current_headers["Cookie"] = wechat_cookie
+                    if wechat_token:
+                        sep = '&' if '?' in current_url else '?'
+                        current_url = f"{current_url}{sep}token={wechat_token}"
+
+                html = await fetch_page(current_url, extra_headers=current_headers, timeout=timeout)
                 
                 from utils.helpers import has_article_content, is_article_unavailable
 
+                # 1. 优先检查是否是永久失效
                 if is_article_unavailable(html):
-                    logger.warning("[Fetch] permanently unavailable (attempt %d/%d) %s",
+                    logger.warning("[Fetch] 文章已删除或违规 (attempt %d/%d) %s",
                                  attempt + 1, max_retries + 1, article_url[:60])
                     return html
 
+                # 2. 检查是否有有效内容
                 if has_article_content(html):
-                    logger.info("[Fetch] len=%d (attempt %d/%d)",
+                    logger.info("[Fetch] 成功获取内容 len=%d (attempt %d/%d)",
                                len(html), attempt + 1, max_retries + 1)
                     return html
-                else:
-                    hint = "unknown"
-                    if "验证" in html or "verify" in html.lower() or "环境异常" in html:
-                        hint = "wechat_verification"
-                    elif "请登录" in html or "login" in html.lower():
-                        hint = "login_required"
-                    elif "location.replace" in html or "location.href" in html:
-                        hint = "redirect_page"
-                    elif len(html) < 1000:
-                        hint = "empty_or_blocked"
-                    
-                    logger.warning(
-                        "[Fetch] invalid (len=%d, hint=%s, attempt %d/%d) %s",
-                        len(html), hint, attempt + 1, max_retries + 1,
-                        article_url[:60]
-                    )
-                    if attempt < max_retries:
-                        await asyncio.sleep(1)
-                        continue
+                
+                # 3. 如果没有内容，分析原因（验证码、频率限制等）
+                hint = "unknown"
+                # 更精确的验证页特征
+                if 'id="verify_container"' in html or 'verify.html' in html or 'mp.weixin.qq.com/mp/verify' in html:
+                    hint = "wechat_verification_page"
+                elif any(x in html for x in ["环境异常", "访问过于频繁", "为了你的帐号安全"]):
+                    hint = "wechat_blocked"
+                elif "请登录" in html or "login" in html.lower():
+                    hint = "login_required"
+                
+                # 如果页面很大（超过100KB），即使有关键字也可能是误判，尝试返回让 processor 处理
+                if len(html) > 100000 and not hint.endswith("_page"):
+                    logger.info("[Fetch] 页面较大 (%d bytes)，即使触发关键字也尝试解析", len(html))
+                    return html
+
+                logger.warning("[Fetch] 无效响应 (len=%d, hint=%s, attempt %d/%d) %s",
+                             len(html), hint, attempt + 1, max_retries + 1, article_url[:60])
+                
+                if attempt < max_retries:
+                    # 动态增加等待时间
+                    wait_time = (attempt + 1) * 2 + (0.5 if attempt == 0 else 1.5)
+                    await asyncio.sleep(wait_time)
+                    continue
                     
             except Exception as e:
-                logger.warning("[Fetch] request error: %s (attempt %d/%d)", 
+                logger.warning("[Fetch] 请求异常: %s (attempt %d/%d)", 
                              str(e)[:100], attempt + 1, max_retries + 1)
                 if attempt < max_retries:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(1.5)
                     continue
         
         return None

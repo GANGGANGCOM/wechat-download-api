@@ -1,90 +1,47 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2026 tmwgsicp
-# Licensed under the GNU Affero General Public License v3.0
-# See LICENSE file in the project root for full license text.
-# SPDX-License-Identifier: AGPL-3.0-only
-"""
-微信公众号文章API服务 - FastAPI版本
-主应用文件
-"""
-
-from contextlib import asynccontextmanager
-from dotenv import load_dotenv
-
-load_dotenv()
-
-from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware
+import os
+import sys
 from pathlib import Path
 
-# 导入路由
-from routes import article, articles, search, admin, login, image, health, stats, rss
+# [FIX] 路径自愈逻辑
+if getattr(sys, 'frozen', False):
+    base_path = Path(sys._MEIPASS)
+    # [FIX] --noconsole 模式下 stdout/stderr 为 None，
+    # 会导致 uvicorn 日志初始化时 isatty() 崩溃
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, 'w')
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, 'w')
+else:
+    base_path = Path(__file__).parent
+    
+if str(base_path) not in sys.path:
+    sys.path.insert(0, str(base_path))
+
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+import logging
+
+# 导入实际存在的路由
+from routes.rss import router as rss_router
+from routes.article import router as article_router
+from routes.articles import router as articles_router
+from routes.login import router as login_router
+from routes.image import router as image_router
+from routes.search import router as search_router
+from routes.health import router as health_router
+from routes.admin import router as admin_router
+from routes.ai import router as ai_router
 from utils.rss_store import init_db
-from utils.rss_poller import rss_poller
 
-API_DESCRIPTION = """
-微信公众号文章下载 API，支持文章解析、公众号搜索、文章列表获取等功能。
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-## 快速开始
+app = FastAPI(title="Gemini RSS API Service")
 
-1. 访问 `/login.html` 扫码登录微信公众号后台
-2. 调用 `GET /api/public/searchbiz?query=公众号名称` 搜索目标公众号
-3. 从返回结果中取 `fakeid`，调用 `GET /api/public/articles?fakeid=xxx` 获取文章列表
-4. 对每篇文章调用 `POST /api/article` 获取完整内容
-
-## 认证说明
-
-所有核心接口都需要先登录。登录后凭证自动保存到 `.env` 文件，服务重启后无需重新登录（有效期约 4 天）。
-"""
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """应用生命周期：启动和关闭"""
-    env_file = Path(__file__).parent / ".env"
-    if not env_file.exists():
-        print("\n" + "=" * 60)
-        print("[WARNING] .env file not found")
-        print("=" * 60)
-        print("Please configure .env file or login via admin page")
-        print("Visit: http://localhost:5000/admin.html")
-        print("=" * 60 + "\n")
-    else:
-        print("\n" + "=" * 60)
-        print("[OK] .env file loaded")
-        print("=" * 60 + "\n")
-
-    init_db()
-    await rss_poller.start()
-    
-    # 启动登录过期提醒器（自动检测凭证有效期并 webhook 通知）
-    from utils.login_reminder import login_reminder
-    await login_reminder.start()
-    
-    yield
-    
-    await login_reminder.stop()
-    await rss_poller.stop()
-
-
-app = FastAPI(
-    title="WeChat Download API",
-    description=API_DESCRIPTION,
-    version="1.0.0",
-    docs_url="/api/docs",
-    redoc_url=None,
-    openapi_url="/api/openapi.json",
-    license_info={
-        "name": "AGPL-3.0",
-        "url": "https://www.gnu.org/licenses/agpl-3.0.html",
-    },
-    lifespan=lifespan,
-)
-
-# CORS配置
+# 配置 CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -93,86 +50,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册路由（注意：articles.router 必须在 search.router 之前注册，避免路由冲突）
-app.include_router(health.router, prefix="/api", tags=["健康检查"])
-app.include_router(stats.router, prefix="/api", tags=["统计信息"])
-app.include_router(article.router, prefix="/api", tags=["文章内容"])
-app.include_router(articles.router, prefix="/api/public", tags=["文章列表"])  # 必须先注册
-app.include_router(search.router, prefix="/api/public", tags=["公众号搜索"])  # 后注册
-app.include_router(admin.router, prefix="/api/admin", tags=["管理"])
-app.include_router(login.router, prefix="/api/login", tags=["登录"])
-app.include_router(image.router, prefix="/api", tags=["图片代理"])
-app.include_router(rss.router, prefix="/api", tags=["RSS 订阅"])
+# 注册路由
+# NOTE: 路由文件内部已自带完整子路径（如 /health, /rss/subscribe），
+# 所以这里统一使用 /api 前缀
+app.include_router(rss_router, prefix="/api", tags=["rss"])
+app.include_router(article_router, prefix="/api", tags=["article"])
+app.include_router(articles_router, prefix="/api/public", tags=["articles"])
+app.include_router(login_router, prefix="/api/login", tags=["login"])
+app.include_router(image_router, prefix="/api", tags=["image"])
+app.include_router(search_router, prefix="/api/public", tags=["search"])
+app.include_router(health_router, prefix="/api", tags=["health"])
+app.include_router(admin_router, prefix="/api/admin", tags=["admin"])
+app.include_router(ai_router, tags=["ai"])
 
-# 静态文件
-static_dir = Path(__file__).parent / "static"
+# [FIX] 挂载静态文件服务（admin.html, login.html 等）
+# NOTE: 必须放在所有 API 路由之后，使用 html=True 支持直接访问 .html 文件
+static_dir = base_path / "static"
 if static_dir.exists():
-    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    from fastapi.staticfiles import StaticFiles
+    # 挂载到根路径，这样 /admin.html, /login.html 等都能直接访问
+    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
 
-@app.get("/api/redoc", include_in_schema=False)
-async def redoc_html():
-    """ReDoc 文档（使用 cdnjs 加速）"""
-    return HTMLResponse("""<!DOCTYPE html>
-<html><head>
-<title>WeChat Download API - ReDoc</title>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet">
-<style>body{margin:0;padding:0;}</style>
-</head><body>
-<redoc spec-url='/api/openapi.json'></redoc>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/redoc/2.1.5/bundles/redoc.standalone.min.js"></script>
-</body></html>""")
+@app.on_event("startup")
+async def startup_event():
+    init_db()
+    logger.info("Database initialized")
 
-# 静态页面路由
-@app.get("/", include_in_schema=False)
+@app.get("/")
 async def root():
-    """首页 - 重定向到管理页面"""
-    return FileResponse(static_dir / "admin.html")
+    return {"message": "Gemini RSS API Service is running"}
 
-@app.get("/admin.html", include_in_schema=False)
-async def admin_page():
-    """管理页面"""
-    return FileResponse(static_dir / "admin.html")
-
-@app.get("/login.html", include_in_schema=False)
-async def login_page():
-    """登录页面"""
-    return FileResponse(static_dir / "login.html")
-
-@app.get("/verify.html", include_in_schema=False)
-async def verify_page():
-    """验证页面"""
-    return FileResponse(static_dir / "verify.html")
-
-@app.get("/rss.html", include_in_schema=False)
-async def rss_page():
-    """RSS 订阅管理页面"""
-    return FileResponse(static_dir / "rss.html")
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Global exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"message": "Internal Server Error", "detail": str(exc)},
+    )
 
 if __name__ == "__main__":
-    import os
-    import uvicorn
     from dotenv import load_dotenv
-
     load_dotenv()
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "5000"))
-    debug = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
-
-    print("=" * 60)
-    print("Wechat Article API Service - FastAPI Version")
-    print("=" * 60)
-    print(f"Admin Page: http://localhost:{port}/admin.html")
-    print(f"API Docs:   http://localhost:{port}/api/docs")
-    print(f"ReDoc Docs: http://localhost:{port}/api/redoc")
-    print("First time? Please login via admin page")
-    print("=" * 60)
-
-    uvicorn.run(
-        "app:app",
-        host=host,
-        port=port,
-        reload=debug,
-        log_level="debug" if debug else "info",
-    )
+    
+    # [FIX] 关键修复：直接传递 app 对象，而不是字符串 "app:app"
+    # 这样可以避免打包后的环境找不到模块
+    uvicorn.run(app, host="0.0.0.0", port=5000)

@@ -1,75 +1,43 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Copyright (C) 2026 tmwgsicp
-# Licensed under the GNU Affero General Public License v3.0
-# See LICENSE file in the project root for full license text.
-# SPDX-License-Identifier: AGPL-3.0-only
 """
-搜索路由 - FastAPI版本
+Search Route
 """
 
 import os
+import time
+import httpx
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 from typing import Optional, List
-import time
-import httpx
 from utils.auth_manager import auth_manager
 from utils.image_proxy import proxy_image_url
 
 router = APIRouter()
 
-
 def get_base_url(request: Request) -> str:
-    """
-    获取服务的基础 URL，优先使用环境变量 SITE_URL，
-    支持反向代理（检测 X-Forwarded-Proto 和 X-Forwarded-Host）
-    """
     site_url = os.getenv("SITE_URL", "").strip()
     if site_url:
         return site_url.rstrip("/")
-    
     proto = request.headers.get("X-Forwarded-Proto", "http")
     host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host", "localhost:5000")
-    
     return f"{proto}://{host}"
 
-class Account(BaseModel):
-    """公众号模型"""
-    id: str
-    name: str
-    round_head_img: str
-
 class SearchResponse(BaseModel):
-    """搜索响应模型"""
     success: bool
     data: Optional[dict] = None
     error: Optional[str] = None
 
-@router.get("/searchbiz", response_model=SearchResponse, summary="搜索公众号")
-async def search_accounts(query: str = Query(..., description="公众号名称或关键词", alias="query"), request: Request = None):
-    """
-    按关键词搜索微信公众号，获取 FakeID。
-
-    **查询参数：**
-    - **query** (必填): 搜索关键词（公众号名称）
-
-    **返回字段：**
-    - `list[]`: 匹配的公众号列表，每项包含 `fakeid`、`nickname`、`alias`、`round_head_img`
-    - `total`: 匹配数量
-    """
+@router.get("/searchbiz", response_model=SearchResponse)
+async def search_accounts(query: str, request: Request = None):
     credentials = auth_manager.get_credentials()
     if not credentials:
-        return SearchResponse(
-            success=False,
-            error="服务器未登录，请先访问管理页面扫码登录"
-        )
+        return SearchResponse(success=False, error="Not logged in")
     
     token = credentials.get("token")
     cookie = credentials.get("cookie")
     
     try:
-        # 调用微信搜索公众号API
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 "https://mp.weixin.qq.com/cgi-bin/searchbiz",
@@ -91,17 +59,11 @@ async def search_accounts(query: str = Query(..., description="公众号名称�
             )
             
             result = response.json()
-            
             if result.get("base_resp", {}).get("ret") == 0:
                 accounts = result.get("list", [])
-                
-                # 获取 base_url 用于图片代理
                 base_url = get_base_url(request) if request else ""
-                
-                # 格式化返回数据
                 formatted_accounts = []
                 for acc in accounts:
-                    # 将头像 URL 转换为代理链接
                     round_head_img = proxy_image_url(acc.get("round_head_img", ""), base_url)
                     formatted_accounts.append({
                         "fakeid": acc.get("fakeid", ""),
@@ -110,23 +72,9 @@ async def search_accounts(query: str = Query(..., description="公众号名称�
                         "round_head_img": round_head_img,
                         "service_type": acc.get("service_type", 0)
                     })
-                
-                return SearchResponse(
-                    success=True,
-                    data={
-                        "list": formatted_accounts,
-                        "total": len(formatted_accounts)
-                    }
-                )
+                return SearchResponse(success=True, data={"list": formatted_accounts, "total": len(formatted_accounts)})
             else:
-                return SearchResponse(
-                    success=False,
-                    error=f"搜索失败: {result.get('base_resp', {}).get('err_msg', '未知错误')}"
-                )
-                
+                return SearchResponse(success=False, error=result.get("base_resp", {}).get("err_msg", "Search failed"))
     except Exception as e:
-        print(f"❌ 搜索公众号失败: {str(e)}")
-        return SearchResponse(
-            success=False,
-            error=f"搜索请求失败: {str(e)}"
-        )
+        print(f"Search failed: {str(e)}")
+        return SearchResponse(success=False, error=str(e))

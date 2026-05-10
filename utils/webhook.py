@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (C) 2026 tmwgsicp
 # Licensed under the GNU Affero General Public License v3.0
 # See LICENSE file in the project root for full license text.
 # SPDX-License-Identifier: AGPL-3.0-only
 """
-Webhook 通知模块
-支持企业微信群机器人和通用 Webhook
+Webhook 閫氱煡妯″潡
+鏀寔浼佷笟寰俊缇ゆ満鍣ㄤ汉鍜岄€氱敤 Webhook
 """
 
 import httpx
@@ -19,12 +19,12 @@ from datetime import datetime
 logger = logging.getLogger("webhook")
 
 EVENT_LABELS = {
-    "login_success": "登录成功",
-    "login_expired": "登录过期",
-    "login_expiring_soon": "登录即将过期",
-    "login_expiring_critical": "登录即将过期（紧急）",
-    "verification_required": "触发验证",
-    "content_fetch_failed": "文章内容获取失败",
+    "login_success": "鐧诲綍鎴愬姛",
+    "login_expired": "鐧诲綍杩囨湡",
+    "login_expiring_soon": "鐧诲綍鍗冲皢杩囨湡",
+    "login_expiring_critical": "鐧诲綍鍗冲皢杩囨湡锛堢揣鎬ワ級",
+    "verification_required": "瑙﹀彂楠岃瘉",
+    "content_fetch_failed": "鏂囩珷鍐呭鑾峰彇澶辫触",
 }
 
 
@@ -38,7 +38,7 @@ class WebhookNotifier:
 
     @property
     def webhook_url(self) -> str:
-        """每次读取时从 .env 刷新，确保运行中修改配置也能生效"""
+        """姣忔璇诲彇鏃朵粠 .env 鍒锋柊锛岀‘淇濊繍琛屼腑淇敼閰嶇疆涔熻兘鐢熸晥"""
         from pathlib import Path
         env_path = Path(__file__).resolve().parent.parent / ".env"
         if env_path.exists():
@@ -57,7 +57,7 @@ class WebhookNotifier:
         return "qyapi.weixin.qq.com" in url
 
     def _build_payload(self, url: str, event: str, data: Dict) -> dict:
-        """根据 webhook 类型构造消息体"""
+        """鏍规嵁 webhook 绫诲瀷鏋勯€犳秷鎭綋"""
         label = EVENT_LABELS.get(event, event)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -115,3 +115,4 @@ class WebhookNotifier:
 
 
 webhook = WebhookNotifier()
+

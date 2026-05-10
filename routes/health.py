@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Copyright (C) 2026 tmwgsicp
-# Licensed under the GNU Affero General Public License v3.0
-# See LICENSE file in the project root for full license text.
-# SPDX-License-Identifier: AGPL-3.0-only
 """
-健康检查路由
+Health Check Route
 """
 
 from fastapi import APIRouter
+from utils.http_client import ENGINE_NAME
+from utils.proxy_pool import proxy_pool
+from utils.auth_manager import auth_manager
 
 router = APIRouter()
 
-
-@router.get("/health", summary="健康检查")
+@router.get("/health", summary="Health Check")
 async def health_check():
-    """
-    检查服务健康状态，包括 HTTP 引擎和代理池信息。
-    """
-    from utils.http_client import ENGINE_NAME
-    from utils.proxy_pool import proxy_pool
-
+    creds = auth_manager.get_credentials()
+    is_logged_in = bool(creds and creds.get("token") and creds.get("cookie"))
+    
     return {
         "status": "healthy",
         "version": "1.0.0",
         "framework": "FastAPI",
         "http_engine": ENGINE_NAME,
         "proxy_pool": proxy_pool.get_status(),
+        "login_status": is_logged_in,
+        "nickname": creds.get("nickname") if is_logged_in else "",
+        "expire_time": creds.get("expire_time") if is_logged_in else None
     }

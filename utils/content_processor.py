@@ -15,20 +15,7 @@ logger = logging.getLogger(__name__)
 def process_article_content(html: str, proxy_base_url: str = None) -> Dict:
     """
     处理文章内容，保持图文顺序并代理图片
-    
-    Args:
-        html: 原始 HTML
-        proxy_base_url: 图片代理基础 URL（例如：https://你的域名.com）
-        
-    Returns:
-        {
-            'content': '处理后的 HTML（图片已代理）',
-            'plain_content': '纯文本',
-            'images': ['图片URL列表'],
-            'has_images': True/False
-        }
     """
-    
     # 1. 提取正文内容（保持原始 HTML 结构）
     content = extract_content(html)
     
@@ -47,16 +34,21 @@ def process_article_content(html: str, proxy_base_url: str = None) -> Dict:
     if proxy_base_url:
         content = proxy_all_images(content, proxy_base_url)
     
-    # 4. 清理和优化 HTML
+    # 4. 清理和优化 HTML (包含头像拦截和页脚剔除)
     content = clean_html(content)
     
-    # 5. 生成纯文本
+    # 5. 移除 HTML 注释
+    content = re.sub(r'<!--.*?-->', '', content, flags=re.DOTALL)
+    
+    # 6. 添加后端标记容器 (V8)，确保全量刷新
+    content = f'<div class="wechat-backend-mark-v8" style="display:none;"></div><div class="wechat-backend-mark-container">{content}</div>'
+
+    # 7. 生成纯文本 (供 AI 分析使用)
     plain_content = html_to_text(content)
     
-    # 6. 纯图片文章处理：如果没有文字但有图片，生成图片描述
+    # 纯图片文章处理
     if not plain_content.strip() and images:
         plain_content = f"[纯图片文章，共 {len(images)} 张图片]"
-        logger.info(f"检测到纯图片文章: {len(images)} 张图片，无文字内容")
     
     return {
         'content': content,
@@ -108,53 +100,60 @@ def extract_content(html: str) -> str:
     For image-text messages (item_show_type=8), short posts (item_show_type=10),
     and audio share pages (item_show_type=7), delegates to helpers.
     """
-    from utils.helpers import (
-        is_image_text_message, _extract_image_text_content,
-        is_short_content_message, _extract_short_content,
-        is_audio_message, _extract_audio_content,
-        get_item_show_type, _extract_audio_share_content,
-    )
+    try:
+        from utils.helpers import (
+            is_image_text_message, _extract_image_text_content,
+            is_short_content_message, _extract_short_content,
+            is_audio_message, _extract_audio_content,
+            get_item_show_type, _extract_audio_share_content,
+        )
+    except ImportError:
+        # Fallback if helpers are missing or broken
+        def get_item_show_type(_): return None
+        def is_image_text_message(_): return False
+        def is_short_content_message(_): return False
+        def is_audio_message(_): return False
 
-    # Check for audio/video share pages (item_show_type=7) FIRST
-    # These pages use Vue apps and have no js_content div
+    # Helper to wrap result with backend mark
+    def wrap_with_mark(content):
+        if not content: return ""
+        return f'<div class="wechat-backend-mark" style="display:none;"></div>{content}'
+
     if get_item_show_type(html) == '7':
         result = _extract_audio_share_content(html)
-        return result.get('content', '')
+        return wrap_with_mark(result.get('content', ''))
 
     if is_image_text_message(html):
         result = _extract_image_text_content(html)
-        return result.get('content', '')
+        return wrap_with_mark(result.get('content', ''))
 
     if is_short_content_message(html):
         result = _extract_short_content(html)
-        return result.get('content', '')
+        return wrap_with_mark(result.get('content', ''))
 
     if is_audio_message(html):
         result = _extract_audio_content(html)
-        return result.get('content', '')
+        return wrap_with_mark(result.get('content', ''))
 
     # Pattern 1: id="js_content" (most common)
     content = _extract_div_inner(html, r'<div[^>]*\bid=["\']js_content["\'][^>]*>')
-    if content:
-        return content
 
     # Pattern 2: class contains rich_media_content
-    content = _extract_div_inner(html, r'<div[^>]*\bclass=["\'][^"\']*rich_media_content[^"\']*["\'][^>]*>')
-    if content:
-        return content
+    if not content:
+        content = _extract_div_inner(html, r'<div[^>]*\bclass=["\'][^"\']*rich_media_content[^"\']*["\'][^>]*>')
 
     # Pattern 3: id="page-content" (government/institutional accounts)
-    content = _extract_div_inner(html, r'<div[^>]*\bid=["\']page-content["\'][^>]*>')
-    if content:
-        return content
+    if not content:
+        content = _extract_div_inner(html, r'<div[^>]*\bid=["\']page-content["\'][^>]*>')
 
     # Pattern 4: class contains rich_media_area_primary_inner
-    content = _extract_div_inner(html, r'<div[^>]*\bclass=["\'][^"\']*rich_media_area_primary_inner[^"\']*["\'][^>]*>')
-    if content:
-        return content
+    if not content:
+        content = _extract_div_inner(html, r'<div[^>]*\bclass=["\'][^"\']*rich_media_area_primary_inner[^"\']*["\'][^>]*>')
 
-    # Pattern 5: id="js_article" (alternative article container)
-    content = _extract_div_inner(html, r'<div[^>]*\bid=["\']js_article["\'][^>]*>')
+    # Pattern 5: Any div with id containing 'content'
+    if not content:
+        content = _extract_div_inner(html, r'<div[^>]*\bid=["\'][^"\']*content[^"\']*["\'][^>]*>')
+
     if content:
         return content
 
@@ -206,7 +205,7 @@ def proxy_all_images(content: str, proxy_base_url: str) -> str:
     2. 替换为代理URL
     3. 确保同时有 data-src 和 src 属性（RSS阅读器需要src）
     
-    重要: RSS 阅读器需要 src 属性才能显示图片!
+    重要: RSS 阅读器需要 src 属性才能显示图片
     """
     
     def replace_img_tag(match):
@@ -224,7 +223,8 @@ def proxy_all_images(content: str, proxy_base_url: str) -> str:
             original_url = src_match.group(1)
         
         if not original_url or not is_valid_image_url(original_url):
-            return img_html
+            # [FIX] 如果是头像、图标或无效图片，直接返回空字符串，即从 HTML 中删除该标签
+            return ""
         
         # 生成代理 URL
         proxy_url = f"{proxy_base_url}/api/image?url={quote(original_url, safe='')}"
@@ -273,7 +273,7 @@ def proxy_all_images(content: str, proxy_base_url: str) -> str:
 
 
 def is_valid_image_url(url: str) -> bool:
-    """判断是否为有效的图片 URL"""
+    """判断是否为有效的正文图片 URL，过滤掉头像和图标"""
     if not url:
         return False
     
@@ -281,29 +281,47 @@ def is_valid_image_url(url: str) -> bool:
     if url.startswith('data:'):
         return False
     
-    # 只保留微信 CDN 图片
+    # [NEW] 屏蔽头像域名和常见头像路径 (包括默认 SVG 头像)
+    blacklist = ['qlogo.cn', 'mmhead', 'headimg', 'avatar', 'qrcode', 'logo', 'icon', 'avatar_default.svg']
+    if any(b in url.lower() for b in blacklist):
+        return False
+
+    # 微信 CDN 域名
     wechat_cdn_domains = [
         'mmbiz.qpic.cn',
         'mmbiz.qlogo.cn',
-        'wx.qlogo.cn'
+        'wx.qlogo.cn',
+        'res.wx.qq.com'
     ]
-    
     return any(domain in url for domain in wechat_cdn_domains)
 
 
 def clean_html(content: str) -> str:
-    """
-    清理和优化 HTML
-    
-    1. 移除 script 标签
-    2. 移除 style 标签（可选）
-    3. 移除空白标签
-    """
-    
-    # 移除 <script> 标签
+    """清理和优化 HTML 结构，移除无关干扰项"""
+    if not content:
+        return ""
+        
+    # 1. 移除 <script> 标签
     content = re.sub(r'<script[^>]*>.*?</script>', '', content, flags=re.DOTALL | re.IGNORECASE)
     
-    # 移除 <style> 标签（可选，保留可以保持样式）
+    # 2. 移除常见的文章页脚、名片、关注区域、评论区（这些区域通常包含头像和二维码）
+    footer_patterns = [
+        r'<div[^>]*class=["\'][^"\']*(?:profile_container|author_profile-info|discuss_container|rich_media_extra|js_profile_qrcode|rich_media_tool|discuss_list)[^"\']*["\'][^>]*>.*?</div>',
+        r'<div[^>]*id=["\'](?:js_pc_qr_code|js_author_profile|js_discuss_list|js_cmt_area)["\'][^>]*>.*?</div>',
+        r'<span[^>]*class=["\'][^"\']*discuss_form_avatar[^"\']*["\'][^>]*>.*?</span>'
+    ]
+    for pattern in footer_patterns:
+        content = re.sub(pattern, '', content, flags=re.DOTALL | re.IGNORECASE)
+
+    # 3. 拦截特定的默认 SVG 头像
+    content = content.replace('https://res.wx.qq.com/t/fed_upload/937b4aa0-2cc5-42ec-81d7-e641da427fff/avatar_default.svg', '')
+    
+    # 4. 移除 HTML 标签中的 JavaScript 事件处理器 (如 onerror, onload, onclick)
+    # 这类属性在 React 的 dangerouslySetInnerHTML 中可能会执行并导致崩溃或白屏
+    content = re.sub(r'\son\w+=(["\']).*?\1', '', content, flags=re.IGNORECASE)
+    content = re.sub(r'\son\w+=[^\s>]+', '', content, flags=re.IGNORECASE)
+
+    # 3. 移除 <style> 标签（可选，保留样式通常更好，除非样式冲突）
     # content = re.sub(r'<style[^>]*>.*?</style>', '', content, flags=re.DOTALL | re.IGNORECASE)
     
     # 移除空段落

@@ -1,143 +1,133 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Copyright (C) 2026 tmwgsicp
-# Licensed under the GNU Affero General Public License v3.0
-# See LICENSE file in the project root for full license text.
-# SPDX-License-Identifier: AGPL-3.0-only
 """
-文章路由 - FastAPI版本
+Article Content Route
 """
 
 import logging
-import re
-from typing import Optional, List
-
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
-
+from pydantic import BaseModel
+from typing import Optional
+from utils.article_fetcher import fetch_article_content
+from utils.content_processor import process_article_content
 from utils.auth_manager import auth_manager
-from utils.helpers import extract_article_info, parse_article_url, is_image_text_message, has_article_content, get_client_ip
-from utils.rate_limiter import rate_limiter
-from utils.webhook import webhook
-from utils.http_client import fetch_page
 
 logger = logging.getLogger(__name__)
-
 router = APIRouter()
 
 class ArticleRequest(BaseModel):
-    """文章请求"""
-    url: str = Field(..., description="微信文章链接，如 https://mp.weixin.qq.com/s/xxxxx")
-
-class ArticleData(BaseModel):
-    """文章数据"""
-    title: str = Field(..., description="文章标题")
-    content: str = Field(..., description="文章 HTML 正文（保留原始排版）")
-    plain_content: str = Field("", description="纯文本正文（去除所有 HTML 标签，适合直接阅读或 AI 处理）")
-    images: List[str] = Field(default_factory=list, description="文章内图片 URL 列表")
-    author: str = Field("", description="作者")
-    publish_time: int = Field(0, description="发布时间戳（秒）")
-    publish_time_str: Optional[str] = Field(None, description="可读发布时间，如 2026-02-24 09:00:00")
+    url: str
 
 class ArticleResponse(BaseModel):
-    """文章响应"""
-    success: bool = Field(..., description="是否成功")
-    data: Optional[ArticleData] = Field(None, description="文章数据，失败时为 null")
-    error: Optional[str] = Field(None, description="错误信息，成功时为 null")
+    success: bool
+    title: Optional[str] = ""
+    content: Optional[str] = ""
+    plain_content: Optional[str] = ""
+    author: Optional[str] = ""
+    publish_time: Optional[int] = 0
+    images: Optional[list] = []
+    error: Optional[str] = None
 
-@router.post("/article", response_model=ArticleResponse, summary="获取文章内容")
-async def get_article(article_request: ArticleRequest, request: Request):
+@router.post("/article", response_model=ArticleResponse)
+async def get_article_detail(req: ArticleRequest, request: Request):
     """
-    解析微信公众号文章，返回标题、正文、图片等结构化数据。
-
-    **请求体参数：**
-    - **url** (必填): 微信文章链接，支持 `https://mp.weixin.qq.com/s/xxxxx` 格式
-
-    **返回字段：**
-    - `title`: 文章标题
-    - `content`: HTML 正文（保留原始排版）
-    - `plain_content`: 纯文本正文（去除所有 HTML 标签，适合直接阅读或 AI 处理）
-    - `author`: 作者
-    - `publish_time`: 发布时间戳
-    - `images`: 文章内的图片列表
+    Get detailed article content including images and plain text
     """
-    client_ip = get_client_ip(request)
-    allowed, error_msg = rate_limiter.check_rate_limit(client_ip, "/api/article")
-    if not allowed:
-        return {"success": False, "error": f"Rate limited: {error_msg}"}
-
-    credentials = auth_manager.get_credentials()
-    if not credentials:
-        return {"success": False, "error": "服务器未登录，请先访问管理页面扫码登录"}
-
     try:
-        logger.info("[Article] request from %s: %s", client_ip, article_request.url[:80])
+        url = req.url
+        # 1. Check if we already have it in the database
+        import re
+        import sqlite3
+        from urllib.parse import urlparse, parse_qs
+        from utils.rss_store import rss_store
+        
+        def extract_params(url_str):
+            parsed = urlparse(url_str)
+            return {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        
+        # We'll search by link as a fallback
+        conn = rss_store.get_connection()
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM articles WHERE link = ?", (url,)).fetchone()
+        
+        if row and row['content_html']:
+            content = row['content_html']
+            # [FIX] 升级到 V8 标记，彻底修复正文截断和 AI 分析失效问题
+            if len(content) > 100 and 'wechat-backend-mark-v8' in content:
+                logger.info(f"Using valid V8 cached content: {url[:60]}")
+                return ArticleResponse(
+                    success=True,
+                    title=row['title'],
+                    content=content,
+                    plain_content=row['content_text'],
+                    author=row['author'],
+                    publish_time=row['create_time'] * 1000 if row['create_time'] else 0,
+                    images=[]  # 缓存版暂时不返回图片列表(通常正文已包含代理后的img标签)
+                )
+            else:
+                logger.info(f"Cache is invalid or old, forcing re-fetch: {url[:60]}")
 
-        html = await fetch_page(
-            article_request.url,
-            extra_headers={"Referer": "https://mp.weixin.qq.com/"},
-            timeout=120
+        # 2. Not in cache, fetch it
+        logger.info(f"Fetching article detail from web: {url[:60]}...")
+        
+        # Get credentials if available
+        creds = auth_manager.get_credentials()
+        token = creds.get("token") if creds else None
+        cookie = creds.get("cookie") if creds else None
+        
+        # Fetch HTML
+        html = await fetch_article_content(url, wechat_token=token, wechat_cookie=cookie)
+        
+        if not html:
+            return ArticleResponse(success=False, error="Failed to fetch article content")
+            
+        # Determine proxy base URL for images
+        base_url = f"{request.url.scheme}://{request.url.netloc}"
+        
+        # Process content
+        processed = process_article_content(html, proxy_base_url=base_url)
+        
+        # Extract metadata
+        title_match = re.search(r'var msg_title = ["\']([^"\']+)["\']', html)
+        title = title_match.group(1) if title_match else "No Title"
+        # [FIX] 如果是短内容（无独立标题的动态），msg_title 会包含全文，导致前端标题排版崩溃，因此强制截断
+        if len(title) > 60:
+            title = title[:50] + "..."
+        
+        author_match = re.search(r'var nickname = ["\']([^"\']+)["\']', html)
+        author = author_match.group(1) if author_match else "Unknown"
+        
+        time_match = re.search(r'var ct = ["\']([^"\']+)["\']', html)
+        publish_time_raw = int(time_match.group(1)) if time_match else 0
+        
+        # 3. Save to database if we can identify it
+        try:
+            # Try to find the article in DB to update it
+            row = conn.execute("SELECT aid FROM articles WHERE link = ?", (url,)).fetchone()
+            if row:
+                rss_store.update_article_content(row['aid'], processed.get('content', ''), processed.get('plain_content', ''))
+                logger.info(f"Updated cache for article {row['aid']}")
+        except Exception as save_err:
+            logger.warning(f"Failed to update cache: {save_err}")
+        # 构造响应
+        result = ArticleResponse(
+            success=True,
+            title=title,
+            content=processed.get('content', ''),
+            plain_content=processed.get('plain_content', ''),
+            author=author,
+            publish_time=publish_time_raw * 1000 if publish_time_raw else 0,
+            images=processed.get('images', [])
         )
-
-        if not has_article_content(html):
-            if "verify" in html or "验证" in html or "环境异常" in html:
-                await webhook.notify('verification_required', {
-                    'url': article_request.url,
-                    'ip': client_ip
-                })
-                return {
-                    "success": False,
-                    "error": "触发微信安全验证。解决方法：1) 在浏览器中打开文章URL完成验证 "
-                             "2) 等待30分钟后重试 3) 降低请求频率"
-                }
-            if "请登录" in html:
-                await webhook.notify('login_expired', {
-                    'account': credentials.get('nickname', ''),
-                    'url': article_request.url
-                })
-                return {"success": False, "error": "登录已失效，请重新扫码登录"}
-            return {
-                "success": False,
-                "error": "无法获取文章内容。可能原因：文章被删除、访问受限或需要验证。"
-            }
-
-        params = parse_article_url(article_request.url)
-
-        if not params or not params.get('__biz'):
-            location_match = re.search(r'var\s+msg_link\s*=\s*"([^"]+)"', html)
-            if location_match:
-                real_url = location_match.group(1).replace('&amp;', '&')
-                params = parse_article_url(real_url)
-
-        if not params or not params.get('__biz'):
-            href_match = re.search(r'window\.location\.href\s*=\s*"([^"]+)"', html)
-            if href_match:
-                real_url = href_match.group(1).replace('&amp;', '&')
-                params = parse_article_url(real_url)
-
-        if not params or not params.get('__biz'):
-            biz_match = re.search(r'var\s+__biz\s*=\s*"([^"]+)"', html)
-            mid_match = re.search(r'var\s+mid\s*=\s*"([^"]+)"', html)
-            idx_match = re.search(r'var\s+idx\s*=\s*"([^"]+)"', html)
-            sn_match = re.search(r'var\s+sn\s*=\s*"([^"]+)"', html)
-
-            if all([biz_match, mid_match, idx_match, sn_match]):
-                params = {
-                    '__biz': biz_match.group(1),
-                    'mid': mid_match.group(1),
-                    'idx': idx_match.group(1),
-                    'sn': sn_match.group(1)
-                }
-
-        if not params or not params.get('__biz'):
-            params = None
-
-        article_data = extract_article_info(html, params)
-
-        return {"success": True, "data": article_data}
-
+        
+        logger.info(f"Article processed successfully: title={title[:30]}, content_len={len(result.content)}")
+        if not result.content:
+            logger.warning(f"Article content is EMPTY for url: {url}")
+            
+        return result
+        
     except Exception as e:
-        error_str = str(e)
-        if "timeout" in error_str.lower():
-            return {"success": False, "error": "请求超时，请稍后重试"}
-        return {"success": False, "error": f"处理请求时发生错误: {error_str}"}
+        import traceback
+        logger.error(f"Error in get_article_detail: {str(e)}")
+        logger.error(traceback.format_exc())
+        return ArticleResponse(success=False, error=str(e))
